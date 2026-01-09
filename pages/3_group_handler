@@ -3,19 +3,15 @@ import pandas as pd
 from openpyxl import load_workbook
 import io
 import re
-# 從 utility 引入共用的國字轉換
 from utility.tournament_utils import to_chinese_match_no
 
 # ==========================================
-# 1. 團體賽專用：循環賽對陣演算法 (移回此處)
+# 1. 團體賽專用：循環賽對陣演算法
 # ==========================================
 def get_round_robin_matches(n):
-    """
-    生成單循環對陣表 (圓環法演算法)
-    """
     teams = list(range(1, n + 1))
     if n % 2 != 0:
-        teams.append(None) # 奇數隊伍補 Bye
+        teams.append(None)
     
     count = len(teams)
     all_rounds = []
@@ -26,7 +22,6 @@ def get_round_robin_matches(n):
             if t1 is not None and t2 is not None:
                 round_matches.append(tuple(sorted((t1, t2))))
         all_rounds.append(round_matches)
-        # 固定第一位，其餘順時針旋轉
         teams = [teams[0]] + [teams[-1]] + teams[1:-1]
     return all_rounds
 
@@ -36,89 +31,110 @@ def get_round_robin_matches(n):
 st.set_page_config(page_title="團體賽籤表製作", layout="wide")
 st.title("🏆 團體賽循環賽籤表生成器")
 
-st.info("請上傳抽籤結果 Excel 與空白循環賽範本。系統將自動辨識 A 欄的組別與序號並填入場次。")
-
-draw_file = st.file_uploader("1. 上傳抽籤結果 (Excel)", type=["xlsx"])
-template_file = st.file_uploader("2. 上傳空白籤表範本 (Excel)", type=["xlsx"])
+col1, col2 = st.columns(2)
+with col1:
+    draw_file = st.file_uploader("1. 上傳抽籤結果 (Excel)", type=["xlsx"])
+with col2:
+    template_file = st.file_uploader("2. 上傳空白籤表範本 (Excel)", type=["xlsx"])
 
 if draw_file and template_file:
-    draw_df = pd.read_excel(draw_file)
+    # 讀取抽籤檔案的所有分頁名稱
+    draw_xl = pd.ExcelFile(draw_file)
+    sheet_names = draw_xl.sheet_names
+    
+    st.subheader("🎯 項目選擇")
+    # 與個人賽一致的 Selectbox
+    selected_item_sheet = st.selectbox(
+        "請選擇本次要製作的團體項目名單（分頁）：",
+        options=sheet_names,
+        index=0
+    )
+
+    # 讀取選定分頁資料
     try:
+        draw_df = pd.read_excel(draw_file, sheet_name=selected_item_sheet)
         # 建立隊伍查詢字典
-        data_map = {int(row['抽籤結果']): str(row['單位']) for _, row in draw_df.iterrows()}
+        data_map = {
+            int(row['抽籤結果']): str(row['單位']) 
+            for _, row in draw_df.dropna(subset=['抽籤結果']).iterrows()
+        }
+        draw_indices = set(data_map.keys())
     except Exception as e:
-        st.error("抽籤結果格式錯誤，請確保包含 '抽籤結果' 與 '單位' 欄位。")
+        st.error(f"讀取名單時出錯，請確保包含 '抽籤結果' 與 '單位' 欄位。")
         st.stop()
 
-    if st.button("執行自動填表"):
+    if st.button(f"🚀 開始填入【{selected_item_sheet}】團體賽程"):
         wb = load_workbook(template_file)
         all_group_info = {}
+        template_indices = set()
         
-        # 步驟一：解析範本 A 欄結構 (辨識 A, B, C 與隊伍序號)
+        # 步驟一：解析範本 A 欄結構並收集序號
         for ws in wb.worksheets:
             current_group = None
             for row_idx in range(1, ws.max_row + 1):
                 val = ws.cell(row=row_idx, column=1).value
                 if val is None: continue
                 
+                # 辨識組別 (A, B, C...)
                 if isinstance(val, str) and re.match(r'^[A-Za-z]$', val.strip()):
                     current_group = val.strip().upper()
                     all_group_info[(ws.title, current_group)] = {"teams": [], "rounds": []}
+                # 辨識隊伍序號
                 elif isinstance(val, (int, float)) and current_group:
-                    all_group_info[(ws.title, current_group)]["teams"].append((row_idx, int(val)))
+                    tid = int(val)
+                    all_group_info[(ws.title, current_group)]["teams"].append((row_idx, tid))
+                    template_indices.add(tid)
 
-        # 步驟二：生成對陣並交叉編號 (A1 -> B1 -> C1 -> A2...)
-        match_labels = {}
-        counter = 1
-        
-        for key in all_group_info:
-            n = len(all_group_info[key]["teams"])
-            all_group_info[key]["rounds"] = get_round_robin_matches(n)
-        
-        max_r = max((len(info["rounds"]) for info in all_group_info.values()), default=0)
-        
-        for r_idx in range(max_r):
-            for key in sorted(all_group_info.keys()):
-                rounds = all_group_info[key]["rounds"]
-                if r_idx < len(rounds):
-                    for m in rounds[r_idx]:
-                        if counter > 99:
-                            label = "不支援"
-                        else:
-                            label = to_chinese_match_no(counter)
-                        
-                        # 找到 A 欄對應的原始隊伍編號
-                        t1_val = all_group_info[key]["teams"][m[0]-1][1]
-                        t2_val = all_group_info[key]["teams"][m[1]-1][1]
-                        match_labels[(key[0], key[1], t1_val, t2_val)] = label
-                        counter += 1
-
-        # 步驟三：填入隊伍名與場次編號
-        for (sheet_name, group_name), info in all_group_info.items():
-            ws = wb[sheet_name]
-            team_list = info["teams"]
+        # 步驟二：資料吻合度檢查
+        if draw_indices != template_indices:
+            missing = draw_indices - template_indices
+            extra = template_indices - draw_indices
+            st.error("❌ 名單與範本序號不吻合！")
+            if missing: st.write(f"⚠️ 名單多出的序號：{sorted(list(missing))}")
+            if extra: st.write(f"⚠️ 範本多出的序號：{sorted(list(extra))}")
+        else:
+            # 步驟三：生成場次與填表邏輯
+            match_labels = {}
+            counter = 1
             
-            for i, (r_idx, tid) in enumerate(team_list):
-                team_name = data_map.get(tid, f"未知名單({tid})")
-                ws.cell(row=r_idx, column=1).value = team_name # 縱軸
-                
-                header_row = team_list[0][0] - 1 # 橫軸填在該組第一列的上方
-                if header_row > 0:
-                    ws.cell(row=header_row, column=i+2).value = team_name
-                
-                for j, (r_idx_j, tid_j) in enumerate(team_list):
-                    if i == j: continue
-                    pair = tuple(sorted((tid, tid_j)))
-                    label = match_labels.get((sheet_name, group_name, pair[0], pair[1]))
-                    if label:
-                        ws.cell(row=r_idx, column=j+2).value = label
+            # 計算各組輪次
+            for key in all_group_info:
+                n = len(all_group_info[key]["teams"])
+                all_group_info[key]["rounds"] = get_round_robin_matches(n)
+            
+            max_r = max((len(info["rounds"]) for info in all_group_info.values()), default=0)
+            
+            # 交叉編號 (A1->B1->A2->B2...)
+            for r_idx in range(max_r):
+                for key in sorted(all_group_info.keys()):
+                    rounds = all_group_info[key]["rounds"]
+                    if r_idx < len(rounds):
+                        for m in rounds[r_idx]:
+                            label = to_chinese_match_no(counter) if counter <= 99 else "超過"
+                            t1_val = all_group_info[key]["teams"][m[0]-1][1]
+                            t2_val = all_group_info[key]["teams"][m[1]-1][1]
+                            match_labels[(key[0], key[1], t1_val, t2_val)] = label
+                            counter += 1
 
-        output = io.BytesIO()
-        wb.save(output)
-        st.success(f"✅ 生成完畢！共計 {counter-1} 個場次。")
-        st.download_button(
-            label="💾 下載團體賽籤表",
-            data=output.getvalue(),
-            file_name="團體賽程結果.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            # 步驟四：正式寫入 Excel
+            for (sheet_name, group_name), info in all_group_info.items():
+                ws = wb[sheet_name]
+                team_list = info["teams"]
+                for i, (r_idx, tid) in enumerate(team_list):
+                    team_name = data_map.get(tid, f"未知({tid})")
+                    ws.cell(row=r_idx, column=1).value = team_name # 縱軸
+                    header_row = team_list[0][0] - 1
+                    if header_row > 0:
+                        ws.cell(row=header_row, column=i+2).value = team_name # 橫軸
+                    
+                    for j, (r_idx_j, tid_j) in enumerate(team_list):
+                        if i == j: continue
+                        pair = tuple(sorted((tid, tid_j)))
+                        label = match_labels.get((sheet_name, group_name, pair[0], pair[1]))
+                        if label:
+                            ws.cell(row=r_idx, column=j+2).value = label
+
+            output = io.BytesIO()
+            wb.save(output)
+            st.success(f"✅ 【{selected_item_sheet}】處理完成！共計 {counter-1} 個場次。")
+            st.download_button(f"💾 下載團體賽程結果", output.getvalue(), f"{selected_item_sheet}_團體賽程.xlsx")
