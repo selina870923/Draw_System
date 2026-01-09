@@ -40,6 +40,20 @@ def to_chinese_match_no(n):
         else:
             return units[tens] + units[remainder]
 
-# 這裡未來可以加入其他共用工具，例如：
-# def format_team_name(name): ...
-# def validate_excel_format(file): ...
+# 在 utility/tournament_utils.py 增加此函數
+def chinese_to_number(c_str):
+    """將國字場次(如：二十一)轉回數字(21)"""
+    units = {"零":0, "一":1, "二":2, "三":3, "四":4, "五":5, "六":6, "七":7, "八":8, "九":9}
+    if not c_str or not isinstance(c_str, str): return 0
+    
+    # 處理「十」、「十一」
+    if c_str == "十": return 10
+    if c_str.startswith("十"): return 10 + units.get(c_str[1], 0)
+    
+    # 處理「二十」、「二一」
+    if len(c_str) == 2:
+        if c_str[1] == "十": return units.get(c_str[0], 0) * 10
+        return units.get(c_str[0], 0) * 10 + units.get(c_str[1], 0)
+    
+    return units.get(c_str, 0)
+
