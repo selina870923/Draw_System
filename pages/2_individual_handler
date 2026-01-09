@@ -1,0 +1,110 @@
+import streamlit as st
+import pandas as pd
+from openpyxl import load_workbook
+import io
+
+st.set_page_config(page_title="個人賽籤表製作", layout="wide")
+st.title("👤 個人賽籤表生成器")
+
+st.info("""
+**📋 使用流程：**
+1. 上傳包含多個項目名單的**抽籤結果**。
+2. 從下方選單**選擇一個項目**（分頁）作為本次填表來源。
+3. 上傳**空白籤表**（系統會自動掃描所有分頁並填入資料）。
+""")
+
+# --- 檔案上傳 ---
+col1, col2 = st.columns(2)
+with col1:
+    draw_file = st.file_uploader("1. 上傳抽籤結果 (Excel)", type=["xlsx"])
+with col2:
+    template_file = st.file_uploader("2. 上傳空白籤表範本 (Excel)", type=["xlsx"])
+
+if draw_file and template_file:
+    # 讀取抽籤檔案的所有分頁名稱，讓使用者選擇「一個」來源
+    draw_xl = pd.ExcelFile(draw_file)
+    sheet_names = draw_xl.sheet_names
+    
+    st.subheader("🎯 項目選擇")
+    # 改用 radio 或 selectbox，確保使用者只選一個項目
+    selected_item_sheet = st.selectbox(
+        "請選擇本次要製作的項目名單（分頁）：",
+        options=sheet_names,
+        index=0
+    )
+
+    # 讀取該選定分頁的資料
+    try:
+        draw_df = pd.read_excel(draw_file, sheet_name=selected_item_sheet)
+        
+        # 檢查必要欄位
+        required_cols = {'抽籤結果', '單位', '名稱'}
+        if not required_cols.issubset(draw_df.columns):
+            st.error(f"❌ 選取的分頁『{selected_item_sheet}』欄位不正確，必須包含: {required_cols}")
+            st.stop()
+
+        # 建立名單 Map
+        data_map = {
+            int(row['抽籤結果']): {'unit': str(row['單位']), 'name': str(row['名稱'])} 
+            for _, row in draw_df.dropna(subset=['抽籤結果']).iterrows()
+        }
+        draw_indices = set(data_map.keys())
+    except Exception as e:
+        st.error(f"讀取名單時出錯：{e}")
+        st.stop()
+
+    if st.button(f"🚀 開始填入【{selected_item_sheet}】資料"):
+        wb = load_workbook(template_file)
+        template_indices = set()
+        
+        # 第一遍掃描：確認所有分頁中 C 欄出現的序號
+        for ws in wb.worksheets:
+            for row_idx in range(1, ws.max_row + 1):
+                val = ws.cell(row=row_idx, column=3).value
+                try:
+                    if val is not None:
+                        # 處理 Excel 內可能出現的浮點數序號
+                        idx = int(float(str(val).strip()))
+                        template_indices.add(idx)
+                except:
+                    continue
+
+        # 吻合度檢查
+        if draw_indices != template_indices:
+            missing = draw_indices - template_indices
+            extra = template_indices - draw_indices
+            
+            st.error(f"❌ 名單與籤表序號不吻合！")
+            if missing:
+                st.write(f"⚠️ 名單中有、但籤表找不到的位置：{sorted(list(missing))}")
+            if extra:
+                st.write(f"⚠️ 籤表有位置、但名單中沒人（含未定義的 Bye）：{sorted(list(extra))}")
+            
+            st.warning("請檢查您選擇的名單分頁與上傳的範本是否匹配。")
+        else:
+            # 第二遍掃描：正式填入
+            fill_count = 0
+            for ws in wb.worksheets:
+                for row_idx in range(1, ws.max_row + 1):
+                    val = ws.cell(row=row_idx, column=3).value
+                    try:
+                        if val is not None:
+                            idx = int(float(str(val).strip()))
+                            if idx in data_map:
+                                # A欄填單位，B欄填名稱
+                                ws.cell(row=row_idx, column=1).value = data_map[idx]['unit']
+                                ws.cell(row=row_idx, column=2).value = data_map[idx]['name']
+                                fill_count += 1
+                    except:
+                        continue
+            
+            # 下載處理
+            output = io.BytesIO()
+            wb.save(output)
+            st.success(f"✅ 【{selected_item_sheet}】處理完成！共填入 {fill_count} 筆資料。")
+            st.download_button(
+                label=f"💾 下載 {selected_item_sheet} 籤表結果",
+                data=output.getvalue(),
+                file_name=f"{selected_item_sheet}_籤表結果.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
