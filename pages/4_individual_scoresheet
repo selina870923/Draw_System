@@ -1,0 +1,137 @@
+import streamlit as st
+import pandas as pd
+from openpyxl import load_workbook
+from docx import Document
+import io
+import math
+from utility.tournament_utils import chinese_to_number
+
+st.set_page_config(page_title="個人賽點單製作", layout="wide")
+st.title("📝 個人賽點單自動生成 (支援合併儲存格與裁切排序)")
+
+st.info("""
+**🚀 運作邏輯說明：**
+1. **支援合併儲存格**：系統會自動偵測 A、B 欄的合併位置，向上/下搜尋最近的有值儲存格。
+2. **對折裁切排序**：若總場次 99 場，Word 第 1 頁會是場次 1 與 51，方便一次裁切。
+3. **輸入需求**：Excel D 欄為國字場次、A 欄學校、B 欄姓名；Word 範本需包含兩個表格。
+""")
+
+# --- 檔案上傳 ---
+col1, col2 = st.columns(2)
+with col1:
+    xl_file = st.file_uploader("1. 上傳已填好的個人賽籤表 (Excel)", type=["xlsx"])
+with col2:
+    word_template = st.file_uploader("2. 上傳空白點單範本 (Word)", type=["docx"])
+
+if xl_file and word_template:
+    if st.button("🚀 開始生成並排版點單"):
+        # --- 步驟一：從 Excel 抓取場次與對手資訊 (處理合併儲存格) ---
+        # 使用 data_only=True 讀取公式計算後的結果
+        wb = load_workbook(xl_file, data_only=True)
+        matches_data = {}
+
+        for ws in wb.worksheets:
+            for r in range(1, ws.max_row + 1):
+                # 讀取 D 欄 (第 4 欄) 的場次號碼
+                cell_val = ws.cell(row=r, column=4).value
+                if isinstance(cell_val, str):
+                    m_num = chinese_to_number(cell_val)
+                    if m_num > 0:
+                        # --- 向上搜尋最近的選手 (左側/上方) ---
+                        l_u, l_n = "", ""
+                        for search_r in range(r - 1, 0, -1):
+                            u = ws.cell(row=search_r, column=1).value
+                            n = ws.cell(row=search_r, column=2).value
+                            if u or n: # 只要學校或姓名其中一個有值就抓取
+                                l_u, l_n = str(u or ""), str(n or "")
+                                break
+                        
+                        # --- 向下搜尋最近的選手 (右側/下方) ---
+                        r_u, r_n = "", ""
+                        for search_r in range(r + 1, ws.max_row + 1):
+                            u = ws.cell(row=search_r, column=1).value
+                            n = ws.cell(row=search_r, column=2).value
+                            if u or n:
+                                r_u, r_n = str(u or ""), str(n or "")
+                                break
+                        
+                        matches_data[m_num] = {
+                            "label": cell_val,
+                            "l_u": l_u, "l_n": l_n,
+                            "r_u": r_u, "r_n": r_n
+                        }
+
+        if not matches_data:
+            st.error("❌ 找不到場次資訊，請確認 Excel D 欄是否有國字場次。")
+            st.stop()
+
+        # --- 步驟二：計算排序邏輯 (裁切排序) ---
+        all_nums = sorted(matches_data.keys())
+        max_num = all_nums[-1]
+        half = math.ceil(max_num / 2) # 每頁印 2 場，所需 A4 張數
+        
+        st.write(f"📊 總場次：{max_num}，裁切基數（half）：{half}")
+
+        # --- 步驟三：填充 Word 表格 ---
+        try:
+            # 讀取範本
+            template_doc = Document(word_template)
+            if len(template_doc.tables) < 2:
+                st.error("❌ Word 範本格式錯誤：必須包含至少兩個表格（上半張與下半張）。")
+                st.stop()
+            
+            output_doc = Document()
+
+            for i in range(1, half + 1):
+                # 取得配對場次：i 是上半張, i + half 是下半張
+                top_id = i
+                bot_id = i + half if (i + half) <= max_num else None
+                
+                # 1. 處理上半張 (Table 0)
+                if top_id in matches_data:
+                    data = matches_data[top_id]
+                    # 從範本複製表格結構與樣式
+                    # (註：這是一個簡化版的表格生成，座標索引需根據您的範本調整)
+                    table_top = output_doc.add_table(rows=len(template_doc.tables[0].rows), 
+                                                   cols=len(template_doc.tables[0].columns))
+                    table_top.style = template_doc.tables[0].style
+                    
+                    # ⚠️ 這裡的 (row, col) 座標請根據您的 Word 表格實際位置修改
+                    table_top.cell(0, 0).text = f"場次：{data['label']}"
+                    table_top.cell(1, 1).text = data['l_u'] # 左側學校
+                    table_top.cell(2, 1).text = data['l_n'] # 左側姓名
+                    table_top.cell(1, 3).text = data['r_u'] # 右側學校
+                    table_top.cell(2, 3).text = data['r_n'] # 右側姓名
+
+                output_doc.add_paragraph("\n") # 表格中間留點空隙
+
+                # 2. 處理下半張 (Table 1)
+                if bot_id and bot_id in matches_data:
+                    data = matches_data[bot_id]
+                    table_bot = output_doc.add_table(rows=len(template_doc.tables[1].rows), 
+                                                   cols=len(template_doc.tables[1].columns))
+                    table_bot.style = template_doc.tables[1].style
+                    
+                    table_bot.cell(0, 0).text = f"場次：{data['label']}"
+                    table_bot.cell(1, 1).text = data['l_u'] 
+                    table_bot.cell(2, 1).text = data['l_n'] 
+                    table_bot.cell(1, 3).text = data['r_u'] 
+                    table_bot.cell(2, 3).text = data['r_n'] 
+
+                # 如果不是最後一頁，插入分頁符號
+                if i < half:
+                    output_doc.add_page_break()
+
+            # --- 步驟四：提供下載 ---
+            target_stream = io.BytesIO()
+            output_doc.save(target_stream)
+            st.success(f"🎉 點單生成完畢！共計 {max_num} 場，{half} 頁 Word。")
+            st.download_button(
+                label="💾 下載比賽點單 Word",
+                data=target_stream.getvalue(),
+                file_name="個人賽點單_裁切排版.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
+        except Exception as e:
+            st.error(f"發生未預期錯誤：{e}")
